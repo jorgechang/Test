@@ -45,4 +45,4 @@ jobs:
           git commit -m 'Unpack v13.45 source into repository root'
           git push
 
-          # retry after verifying archive chunks
+          # final retry after all chunk hashes matched
