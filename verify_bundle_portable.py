@@ -1,61 +1,119 @@
 #!/usr/bin/env python3
-"""Run verify_bundle.py with Python-version-independent AST dumping.
+"""Portable offline verifier for the Git-cloned v13.45 bundle.
 
-The v13.45 logic hashes were generated with Python 3.13, where ast.dump()
-omits empty optional fields by default. Isaac Sim 6.0.1 on OSCAR uses Python
-3.12, whose ast.dump() includes those empty fields, producing different hashes
-for identical source. This wrapper normalizes the dump format before executing
-the original verifier. It does not modify the task or training code.
+The original ``verify_bundle.py`` was designed for the packaged ZIP. Two details
+make it unsuitable as-is on OSCAR:
+
+1. Its per-method contract hashes use ``ast.dump()``, whose serialization differs
+   between Python 3.12 (Isaac Sim 6.0.1 on OSCAR) and the Python version used to
+   package the bundle. Identical source can therefore produce different hashes.
+2. Its final manifest check requires that *no extra files* exist. A normal
+   ``git clone`` necessarily adds ``.git/``, and this portable helper itself is
+   also an extra file.
+
+This verifier avoids both false failures without weakening the distributed-code
+integrity check: it verifies the SHA-256 of every file listed in the original
+bundle manifest (including the complete ANYmal environment source), then runs all
+non-AST contract checks and all behavioral sanity scripts from the original
+verifier. Training/environment code is not modified.
 """
 from __future__ import annotations
 
-import ast
+import hashlib
 import pathlib
-import runpy
+import py_compile
+import subprocess
+import sys
 
-_ORIGINAL_DUMP = ast.dump
+import verify_bundle as v
 
-
-def _compact_dump(node: ast.AST, annotate_fields: bool = True, include_attributes: bool = False, *, indent=None, **kwargs) -> str:
-    """Match Python 3.13 ast.dump(..., show_empty=False) on older Python."""
-    try:
-        return _ORIGINAL_DUMP(
-            node,
-            annotate_fields=annotate_fields,
-            include_attributes=include_attributes,
-            indent=indent,
-            show_empty=False,
-        )
-    except TypeError:
-        pass
-
-    def render(value):
-        if isinstance(value, ast.AST):
-            fields = []
-            for name in value._fields:
-                field_value = getattr(value, name, None)
-                if field_value is None or field_value == []:
-                    continue
-                rendered = render(field_value)
-                fields.append(f"{name}={rendered}" if annotate_fields else rendered)
-            if include_attributes:
-                for name in getattr(value, "_attributes", ()):
-                    if hasattr(value, name):
-                        rendered = render(getattr(value, name))
-                        fields.append(f"{name}={rendered}" if annotate_fields else rendered)
-            return f"{value.__class__.__name__}({', '.join(fields)})"
-        if isinstance(value, list):
-            return "[" + ", ".join(render(item) for item in value) + "]"
-        if isinstance(value, tuple):
-            body = ", ".join(render(item) for item in value)
-            if len(value) == 1:
-                body += ","
-            return "(" + body + ")"
-        return repr(value)
-
-    return render(node)
-
-
-ast.dump = _compact_dump
 HERE = pathlib.Path(__file__).resolve().parent
-runpy.run_path(str(HERE / "verify_bundle.py"), run_name="__main__")
+MANIFEST = HERE / "BUNDLE_MANIFEST.sha256"
+
+
+def verify_distributed_manifest() -> None:
+    """Verify every file shipped in the original v13.45 bundle byte-for-byte.
+
+    Extra files such as ``.git/`` and this helper are intentionally allowed.
+    """
+    v.req(MANIFEST.is_file(), "bundle manifest exists")
+    count = 0
+    for line in MANIFEST.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, rel = line.split(maxsplit=1)
+        rel = rel.strip()
+        path = HERE / rel
+        v.req(path.is_file(), f"manifest file exists: {rel}")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        v.req(actual == digest, f"manifest hash: {rel}")
+        count += 1
+    v.req(count > 0, "manifest contains distributed files")
+
+
+def verify_exact_task_source() -> None:
+    """Make the old AST contract portable by checking the entire source file."""
+    expected = "9fa536020b654b3190dc86899342d1f1b9685d785ceebe48644fea57a9970a72"
+    actual = hashlib.sha256(v.ENV.read_bytes()).hexdigest()
+    v.req(actual == expected, "exact distributed ANYmal environment source")
+    print(
+        "[VERIFY] INFO: exact environment-file SHA replaces Python-version-dependent "
+        "per-method ast.dump hashes"
+    )
+
+
+def main() -> None:
+    # Integrity first: this is stronger than checking only selected methods and is
+    # independent of Python's AST serialization format.
+    verify_distributed_manifest()
+    verify_exact_task_source()
+
+    # All remaining static/behavioral contracts from the original verifier.
+    v.check_config_contract()
+    v.check_action_extension()
+    v.check_training_budget()
+    v.check_camera_contract()
+    v.check_scene_and_sampler()
+    v.check_reward_source()
+    v.check_cleanup_and_logging()
+    v.check_arrow_and_rgb_routing()
+    v.check_proprioception_routing()
+    v.check_install_and_launchers()
+    v.check_run_management_and_best_checkpoints()
+
+    # Syntax checks. Ignore Git internals; only distributed/runtime Python matters.
+    for path in HERE.rglob("*.py"):
+        if ".git" in path.parts:
+            continue
+        py_compile.compile(str(path), doraise=True)
+    print("[VERIFY] OK: Python syntax")
+
+    for path in HERE.glob("*.sh"):
+        subprocess.run(["bash", "-n", str(path)], check=True)
+    print("[VERIFY] OK: shell syntax")
+
+    # Same behavioral/offline sanity suite as verify_bundle.py.
+    for script in (
+        "v13_20_reward_sanity.py",
+        "visible_arrow_sanity.py",
+        "object_layout_sanity.py",
+        "proprioception_sanity.py",
+        "camera_mount_sanity.py",
+        "action_space_sanity.py",
+        "installer_sanity.py",
+        "launcher_sanity.py",
+        "checkpoint_manager_sanity.py",
+        "run_manager_sanity.py",
+    ):
+        subprocess.run([sys.executable, str(HERE / script)], check=True)
+
+    print(
+        "[VERIFY] OK: reward, arrow, balanced randomization, proprioception, "
+        "camera mount, action-space, installer, launcher, run-manager, "
+        "checkpoint-manager sanity"
+    )
+    print("[VERIFY] ALL OFFLINE CHECKS PASSED")
+
+
+if __name__ == "__main__":
+    main()
