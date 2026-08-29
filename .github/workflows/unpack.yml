@@ -44,3 +44,5 @@ jobs:
           git add -A
           git commit -m 'Unpack v13.45 source into repository root'
           git push
+
+          # retry after verifying archive chunks
