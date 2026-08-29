@@ -1,0 +1,46 @@
+name: unpack-v1345
+
+on:
+  push:
+    paths:
+      - '.github/workflows/unpack.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and unpack v13.45
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=r2dreamer_isaaclab_anymal_v13_45_simple_runs_three_checkpoints_proprio_complete.zip
+          EXPECTED=553db463a3be0149b90a89c319df22b31adcedefd870607c1464e34ed4ae0aff
+
+          cat bundle_parts/part_*.b64 | tr -d '\n\r ' | base64 -d > "$ZIP"
+          echo "$EXPECTED  $ZIP" | sha256sum -c -
+
+          rm -rf .unpack
+          mkdir .unpack
+          unzip -q "$ZIP" -d .unpack
+          SRC=$(find .unpack -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          test -n "$SRC"
+
+          rsync -a "$SRC"/ ./
+
+          rm -rf bundle_parts restore_bundle.sh "$ZIP" .unpack
+          rm -f .github/workflows/unpack.yml
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Unpack v13.45 source into repository root'
+          git push
