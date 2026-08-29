@@ -1,0 +1,137 @@
+# BEGIN CAMERA_POSE_GIF_PATCH
+# Optional standalone GIF export for videos already produced by r2dreamer.
+# Enable with: R2DREAMER_SAVE_GIFS=1
+from pathlib import Path as _GifPath
+import os as _gif_os
+import re as _gif_re
+import shutil as _gif_shutil
+
+
+def _gif_truthy(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _gif_to_uint8(value):
+    value = np.asarray(value)
+    if np.issubdtype(value.dtype, np.floating):
+        finite = value[np.isfinite(value)]
+        if finite.size and finite.min() >= -0.01 and finite.max() <= 1.01:
+            value = value * 255.0
+        value = np.nan_to_num(value, nan=0.0, posinf=255.0, neginf=0.0)
+    return np.clip(value, 0, 255).astype(np.uint8)
+
+
+def _gif_safe_name(name):
+    return _gif_re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name)).strip("_") or "video"
+
+
+def _gif_make_frames(name, value, scale, max_batch):
+    from PIL import Image, ImageDraw
+
+    value = _gif_to_uint8(value)
+    if value.ndim != 5:
+        raise ValueError(f"Expected video shape (B,T,H,W,C), got {value.shape}")
+    if value.shape[-1] == 1:
+        value = np.repeat(value, 3, axis=-1)
+    if value.shape[-1] != 3:
+        raise ValueError(f"Expected 1 or 3 channels, got {value.shape[-1]}")
+
+    batch = min(max(1, int(max_batch)), value.shape[0])
+    frames = []
+    is_open_loop = "open_loop" in str(name)
+    for t in range(value.shape[1]):
+        # Match TensorBoard: selected batch items are tiled horizontally.
+        canvas_np = np.concatenate([value[b, t] for b in range(batch)], axis=1)
+        image = Image.fromarray(canvas_np, mode="RGB")
+
+        # r2dreamer.video_pred() vertically stacks truth, model, and error.
+        if is_open_loop and image.height % 3 == 0:
+            panel_h = image.height // 3
+            header_h = 14
+            labelled = Image.new("RGB", (image.width, image.height + header_h), "black")
+            labelled.paste(image, (0, header_h))
+            draw = ImageDraw.Draw(labelled)
+            phase = "posterior reconstruction" if t < 5 else "open-loop prediction"
+            draw.text((3, 2), f"t={t:02d} | {phase}", fill="white")
+            for index, label in enumerate(("REAL", "DREAMER", "ERROR")):
+                y = header_h + index * panel_h + 2
+                draw.rectangle((1, y - 1, 54, y + 10), fill=(0, 0, 0))
+                draw.text((3, y), label, fill="white")
+            image = labelled
+
+        if scale > 1:
+            image = image.resize(
+                (image.width * scale, image.height * scale),
+                resample=Image.Resampling.NEAREST,
+            )
+        frames.append(image)
+    return frames
+
+
+def _gif_save_video(logger, name, value, step):
+    try:
+        fps = max(1, int(logger._gif_fps))
+        scale = max(1, int(logger._gif_scale))
+        frames = _gif_make_frames(name, value, scale, logger._gif_max_batch)
+        if not frames:
+            return
+        safe_name = _gif_safe_name(name)
+        path = logger._gif_dir / f"{safe_name}_step_{int(step):09d}.gif"
+        frames[0].save(
+            path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=max(1, round(1000 / fps)),
+            loop=0,
+            optimize=False,
+            disposal=2,
+        )
+        latest = logger._gif_dir / f"{safe_name}_latest.gif"
+        _gif_shutil.copyfile(path, latest)
+        print(f"[GIF] Saved {path}")
+    except Exception as exc:
+        print(f"[GIF][WARNING] Could not save {name!r} at step {step}: {exc}")
+
+
+_GIF_ORIGINAL_LOGGER_INIT = Logger.__init__
+_GIF_ORIGINAL_LOGGER_WRITE = Logger.write
+
+
+def _gif_logger_init(self, *args, **kwargs):
+    _GIF_ORIGINAL_LOGGER_INIT(self, *args, **kwargs)
+    self._gif_enabled = _gif_truthy(_gif_os.environ.get("R2DREAMER_SAVE_GIFS", "0"))
+    self._gif_fps = int(_gif_os.environ.get("R2DREAMER_GIF_FPS", "8"))
+    self._gif_scale = int(_gif_os.environ.get("R2DREAMER_GIF_SCALE", "4"))
+    self._gif_max_batch = int(_gif_os.environ.get("R2DREAMER_GIF_MAX_BATCH", "1"))
+    names = _gif_os.environ.get(
+        "R2DREAMER_GIF_NAMES",
+        "train_video,open_loop,eval_video,eval_open_loop",
+    )
+    self._gif_names = {item.strip() for item in names.split(",") if item.strip()}
+    default_dir = _GifPath(self._logdir) / "gifs"
+    self._gif_dir = _GifPath(_gif_os.environ.get("R2DREAMER_GIF_DIR", str(default_dir)))
+    if self._gif_enabled:
+        self._gif_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            f"[GIF] Standalone export enabled: dir={self._gif_dir}, "
+            f"fps={self._gif_fps}, scale={self._gif_scale}, names={sorted(self._gif_names)}"
+        )
+
+
+def _gif_logger_write(self, step, fps=False):
+    pending = {}
+    if getattr(self, "_gif_enabled", False):
+        pending = {
+            name: np.array(value, copy=True)
+            for name, value in self._videos.items()
+            if name in self._gif_names
+        }
+    result = _GIF_ORIGINAL_LOGGER_WRITE(self, step, fps=fps)
+    for name, value in pending.items():
+        _gif_save_video(self, name, value, step)
+    return result
+
+
+Logger.__init__ = _gif_logger_init
+Logger.write = _gif_logger_write
+# END CAMERA_POSE_GIF_PATCH

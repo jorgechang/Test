@@ -1,0 +1,165 @@
+# ANYmal-C v13.45: exact v13.20 reward on the current visible-arrow task.
+# Visual/task setup: 128x128 RGB, 90-deg HFOV, 8x8 m room, randomized objects,
+# and a large collision-free green arrow at the implied desired robot-base pose.
+# Dreamer encoder input is RGB only by default. Dedicated launchers optionally
+# add robot-only proprioception; the 4-D target decoder stays disabled by default.
+task: "isaaclabanymalroom_anymal_visible_arrow_random_objects_8m_v13_45_balanced_randomization_proprio"
+steps: 1.01e6
+env_num: 1
+eval_episode_num: 0
+
+action_repeat: 1
+train_ratio: 256
+headless: true
+visualizer: none
+livestream: 0
+seed: ${seed}
+task_seed: ${seed}
+device: ${device}
+size: [128, 128]
+camera_horizontal_fov_deg: 90.0
+camera_horizontal_aperture: 20.955
+camera_pitch_deg: 0.0
+camera_offset_x: 0.510
+camera_offset_y: 0.0
+camera_offset_z: 0.015
+
+# Dreamer acts at 10 Hz (agent_decimation=20, physics dt=0.005 s), so this is 50 s.
+time_limit: 500
+action_count: 11
+
+# Original v13.40 action table plus two appended body-frame lateral commands.
+forward_speed: 0.45
+backward_speed: 0.25
+arc_forward_speed: 0.32
+arc_yaw_rate: 0.35
+lateral_speed: 0.25
+coarse_yaw_rate: 0.45
+fine_yaw_rate: 0.20
+
+# Visible task specification. The arrow is collision-free USD geometry and is
+# intentionally present in the robot's RGB observation.
+show_goal_arrow: true
+# The visible arrow depicts the implied ROBOT-BASE goal while reward/success still
+# evaluate the unchanged target CAMERA pose. "base" means arrow base = desired
+# robot-base XY and arrow direction = desired robot-base yaw. The arrow is long
+# enough that a useful portion remains ahead of the level camera at success.
+# "tip" is still supported as a visualization-only alternate.
+arrow_target_anchor: "base"
+arrow_length: 1.60
+arrow_head_length: 0.55
+arrow_shaft_width: 0.26
+arrow_head_base_width: 0.68
+arrow_head_mid_width: 0.44
+arrow_head_tip_width: 0.22
+# Keep the full floor marker visible rather than letting it cross a wall or prop.
+arrow_wall_clearance: 0.10
+arrow_object_clearance: 0.10
+# Surface clearance between the complete arrow footprint and the initial robot-base center.
+arrow_start_clearance: 0.35
+
+# Per-episode and per-environment landmark randomization. Wall/object clearances
+# here are surface-to-surface distances. Robot/goal clearances below retain the
+# original v13.14 center-distance semantics.
+randomize_objects: true
+randomize_object_yaw: true
+object_wall_clearance: 0.45
+object_min_clearance: 0.70
+object_sampling_attempts: 512
+
+# Improved task randomness. Every local vector environment has an independent,
+# reproducible stream keyed by (task_seed, env_id, episode, component), so an
+# asynchronous reset in one environment cannot shift another environment's
+# future layouts. Continuous jitter is retained inside balanced joint strata.
+balanced_randomization: true
+start_sampling_attempts: 512
+start_stratified_attempts: 64
+start_grid_bins: 4
+start_yaw_bins: 8
+goal_sampling_attempts: 1024
+goal_stratified_attempts: 64
+goal_distance_bins: 4
+goal_bearing_bins: 8
+goal_yaw_bins: 8
+object_yaw_bins: 8
+
+# Optional robot-only proprioception. Dedicated launchers turn this on and route
+# only this key through Dreamer's MLP encoder/decoder. The vector is 33-D for
+# ANYmal-C: body linear velocity (3), body angular velocity (3), projected
+# gravity (3), joint positions relative to default (12), and joint velocities
+# (12). It contains no global position/yaw and no target/goal information.
+proprioception_enabled: false
+proprio_linear_velocity_scale: 2.0
+proprio_angular_velocity_scale: 0.25
+proprio_joint_position_scale: 1.0
+proprio_joint_velocity_scale: 0.05
+proprio_clip: 5.0
+
+# Optional viewport-only human debug overlay (not part of TiledCamera RGB).
+show_target_debug: false
+target_debug_strict: false
+target_debug_arrow_length: 1.25
+target_debug_axis_length: 0.35
+target_debug_frustum_distance: 0.38
+target_debug_frustum_half_width: 0.20
+target_debug_frustum_half_height: 0.14
+target_debug_line_width: 5.0
+target_debug_point_size: 12.0
+target_debug_max_envs: 64
+
+# Fixed full training distribution from the first reset: no curriculum and no stages.
+# Training is fixed from reset 1 at 0.5--4.0 m with the precise 0.12 m / 5 deg / 5-step success criterion.
+goal_min_distance: 0.50
+goal_max_distance: 4.00
+goal_bearing_max_deg: 180.0
+goal_relative_yaw_max_deg: 180.0
+goal_wall_clearance: 0.85
+goal_object_clearance: 0.85
+position_tolerance: 0.12
+yaw_tolerance_deg: 5.0
+success_hold_steps: 5
+
+# Exact v13.20 SIMPLE STATE REWARD: no PBRS, no weighted deltas, no success bonus.
+# Reward = 0.5 * exp(-E/2m) + 0.5 while inside the precise camera tolerance.
+geometry_yaw_metres_per_rad: 3.0
+geometry_rho0: 1.00
+geometry_k_alpha: 0.5
+geometry_k_beta: 0.25
+geometry_k_yaw: 1.0
+proximity_scale: 0.5
+proximity_sigma: 2.0
+in_tolerance_reward: 0.5
+
+# ANYmal control/safety.
+agent_decimation: 20
+anymal_velocity_debug: false
+camera_debug: false
+start_wall_clearance: 1.20
+start_object_clearance: 1.20
+base_goal_wall_clearance: 1.15
+base_goal_object_clearance: 1.20
+fall_height: 0.32
+upright_threshold: 0.25
+room_exit_margin: 0.10
+wall_guard_enabled: true
+wall_guard_terminal: false
+wall_guard_clearance: 0.70
+
+# Critical no-leak routing:
+# - Default launchers: MultiEncoder/RSSM receives RGB only; decoder reconstructs RGB.
+# - Proprio launchers add only the robot-internal proprio key to both MLP routes.
+# - goal_vec never enters the encoder and can be enabled only as a decoder target with
+#   GOALVEC_DECODER_ENABLED=1.
+encoder:
+  cnn_keys: "image"
+  mlp_keys: "^$"
+
+decoder:
+  cnn_keys: "image"
+  mlp_keys: "^$"
+
+# The wall guard is diagnostic only: no termination and no reward term.
+# Success is diagnostic/non-terminal; fall, true room exit, and timeout end episodes.
+
+# Isaac Lab 3.0 attached-camera workaround: TiledCamera data.pos_w/quat_w_world
+# are NOT used for geometry. Run the RGB-motion test before visual training.
